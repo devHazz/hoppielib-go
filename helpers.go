@@ -21,3 +21,12 @@ func GetStatusNotams(client *http.Client) ([]string, error) {
 
 	return status.Notams, nil
 }
+
+// Brief function to assist with nil pointer deref checking, particularly used for MRNs
+func NilCheck[T any](v *T) string {
+	if v != nil {
+		return fmt.Sprintf("%v", *v)
+	} else {
+		return "nil"
+	}
+}

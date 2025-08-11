@@ -24,7 +24,8 @@ type ACARSManager struct {
 	logon               string
 	callsign            *string
 	messages            chan ACARSMessage
-	connection          *ACARSConnection
+	Connection          *ACARSConnection
+	ErrGroup            *errgroup.Group
 	inboundPollInterval int
 	ctx                 context.Context
 	cancel              context.CancelFunc
@@ -39,10 +40,11 @@ const (
 )
 
 type ACARSConnection struct {
-	mutex   sync.Mutex
-	state   ConnectionState
-	station *string
-	lastMin int
+	mutex       sync.Mutex
+	state       ConnectionState
+	stateChange chan ConnectionState
+	station     *string
+	lastMin     int
 }
 
 func (c *ACARSConnection) SetStation(station string) {
@@ -55,66 +57,85 @@ func (c *ACARSConnection) Station() *string {
 	return c.station
 }
 
+func (c *ACARSConnection) IncrementMin() {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.lastMin++
+}
+
 func (c *ACARSConnection) SetConnectionState(state ConnectionState) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.state = state
 }
 
-func (c *ACARSConnection) State() ConnectionState {
-	return c.state
-}
-
 func NewACARSManager(logon string, callsign string) *ACARSManager {
 	ctx, cancel := context.WithCancel(context.Background())
+	group, _ := errgroup.WithContext(ctx)
+
 	return &ACARSManager{
 		logon:    logon,
 		callsign: &callsign,
-		messages: make(chan ACARSMessage),
-		connection: &ACARSConnection{
-			state:   Disconnected,
-			lastMin: 1,
+		messages: make(chan ACARSMessage, 1),
+		Connection: &ACARSConnection{
+			state:       Disconnected,
+			stateChange: make(chan ConnectionState, 1),
+			lastMin:     1,
 		},
 		inboundPollInterval: AcarsPollInterval, // 20 Second Polling Rate
+		ErrGroup:            group,
 		ctx:                 ctx,
 		cancel:              cancel,
 	}
 }
 
 func (m *ACARSManager) Connect(station string) error {
-	m.connection.SetStation(station)
-	m.connection.SetConnectionState(Waiting)
+	m.Connection.SetStation(station)
+
+	m.Connection.SetConnectionState(Waiting)
+	m.Connection.stateChange <- Waiting
 
 	_, err := MakeRawRequest(m.logon, *m.callsign, station, CpdlcMessage, MakeCPDLCPacket(
-		*m.callsign,
-		m.connection.lastMin,
+		m.Connection.lastMin,
 		nil,
-		Required,
+		RespondRequired,
 		"REQUEST LOGON",
 	))
-
-	fmt.Printf("Sending logon request to station: %s\n", station)
 
 	if err != nil {
 		return err
 	}
 
-	g, _ := errgroup.WithContext(m.ctx)
-	g.Go(m.Listen)
-
-	if err = g.Wait(); err != nil {
-		return err
-	}
+	m.ErrGroup.Go(m.Listen)
 
 	return nil
 }
 
+func (m *ACARSManager) HandleConnectedState(f func()) {
+	for state := range m.RecvState() {
+		switch state {
+		case Connected:
+			f()
+		case Waiting:
+			fmt.Printf("Waiting for logon with station: %s\n", *m.Connection.Station())
+		default:
+			fmt.Printf("Connection state change, no longer connected with station: %s\n", *m.Connection.Station())
+		}
+	}
+}
+
+func (m *ACARSManager) ConnectionState() ConnectionState {
+	return m.Connection.state
+}
+
+func (m *ACARSManager) RecvState() chan ConnectionState {
+	return m.Connection.stateChange
+}
+
 func (m *ACARSManager) Listen() error {
-	if m.callsign == nil && m.connection.station == nil {
+	if m.callsign == nil && m.Connection.station == nil {
 		return errors.New("both fields for acars connection invalid")
 	}
-
-	go m.listenMessageQueue()
 
 	// Create a ticker with a certain interval to make Hoppie happy
 	fmt.Printf("Setup polling with interval of %ds..\n", m.inboundPollInterval)
@@ -123,7 +144,7 @@ func (m *ACARSManager) Listen() error {
 		data, e := MakeRawRequest(
 			m.logon,
 			*m.callsign,
-			*m.connection.station,
+			*m.Connection.station,
 			PollMessage,
 			"",
 		)
@@ -131,44 +152,61 @@ func (m *ACARSManager) Listen() error {
 			return e
 		}
 
-		if strings.HasPrefix(data, "ok") {
-			for _, v := range ParseACARSMessage(data) {
-				if m.connection.State() == Waiting && v.Type == CpdlcMessage {
-					message, e := ParseCPDLCMessage(v.Data)
-					if e != nil {
-						return e
-					}
-
-					if message.Data == "LOGON ACCEPTED" && *message.Mrn == m.connection.lastMin {
-						m.connection.SetConnectionState(Connected)
-						fmt.Printf("Received successful logon from station: %s, pushing connected to current state\n", v.Sender)
-					}
+		for _, v := range ParseACARSMessage(data) {
+			if m.ConnectionState() == Waiting && v.Type == CpdlcMessage {
+				message, e := ParseCPDLCMessage(v.Data)
+				if e != nil {
+					return e
 				}
 
-				m.messages <- v
+				if message.Data == "LOGON ACCEPTED" && *message.Mrn == m.Connection.lastMin {
+					m.Connection.SetConnectionState(Connected)
+					m.Connection.stateChange <- Connected
+
+					fmt.Printf("Received successful logon from station: %s, pushing connected to current state\n", v.Sender)
+				}
 			}
+
+			m.messages <- v
 		}
 	}
 
 	return nil
 }
 
-// Basic implementation of how the queue system would look when receiving a message from
-func (m *ACARSManager) listenMessageQueue() {
-	fmt.Println("Setup listening for message queue..")
-	for {
-		message := <-m.messages
-		fmt.Printf("Got message: From=%s, Type=%s (%s), Content=%s\n",
-			message.Sender,
-			message.Type,
-			message.Type.Description(),
-			message.Data,
-		)
+// Sends a CPDLC Request to connected station
+//
+// For example, providing LOGON ACCEPTED in the data field & OperationalResponse as a RRK
+//
+// Will result in data being sent with an output like `/data2/min/mrn/NE/LOGON ACCEPTED`
+func (m *ACARSManager) CPDLCRequest(data string, rrk ResponseRequirements) error {
+	if m.ConnectionState() != Connected || m.Connection.Station() == nil {
+		return errors.New("no cpdlc connection made or invalid station")
 	}
+
+	m.Connection.IncrementMin()
+
+	packet := MakeCPDLCPacket(
+		m.Connection.lastMin,
+		nil,
+		rrk,
+		data,
+	)
+
+	_, e := MakeRawRequest(m.logon, *m.callsign, *m.Connection.Station(), CpdlcMessage, packet)
+	if e != nil {
+		return e
+	}
+
+	return nil
+}
+
+// Basic implementation of how the queue system would look when receiving a message from
+func (m *ACARSManager) Recv() chan ACARSMessage {
+	return m.messages
 }
 
 func MakeCPDLCPacket(
-	callsign string,
 	min int,
 	mrn *int,
 	rrk ResponseRequirements,

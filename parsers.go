@@ -14,12 +14,12 @@ var (
 	ErrInvalidAdsCFormat  = errors.New("Message does not follow ADS-C message format")
 
 	responseRequirementDescription = map[ResponseRequirements]string{
-		WilcoUnable:         "Wilco or Unable",
-		AffirmNegative:      "Affirm or Negative",
-		Roger:               "Roger",
-		OperationalResponse: "Operational Response Required",
-		Required:            "Response Required",
-		NotRequired:         "Response Not Required",
+		RespondWilcoUnable:         "Wilco or Unable",
+		RespondAffirmNegative:      "Affirm or Negative",
+		RespondRoger:               "Roger",
+		RespondOperationalResponse: "Operational Response Required",
+		RespondRequired:            "Response Required",
+		RespondNotRequired:         "Response Not Required",
 	}
 )
 
@@ -43,12 +43,12 @@ func isValidResponseRequirement(rrk string) bool {
 }
 
 const (
-	WilcoUnable         ResponseRequirements = "WU"
-	AffirmNegative      ResponseRequirements = "AN"
-	Roger               ResponseRequirements = "R"
-	OperationalResponse ResponseRequirements = "NE"
-	Required            ResponseRequirements = "Y"
-	NotRequired         ResponseRequirements = "N"
+	RespondWilcoUnable         ResponseRequirements = "WU"
+	RespondAffirmNegative      ResponseRequirements = "AN"
+	RespondRoger               ResponseRequirements = "R"
+	RespondOperationalResponse ResponseRequirements = "NE"
+	RespondRequired            ResponseRequirements = "Y"
+	RespondNotRequired         ResponseRequirements = "N"
 )
 
 func (rrk *ResponseRequirements) Description() string {
