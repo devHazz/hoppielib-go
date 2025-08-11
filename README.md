@@ -1,6 +1,6 @@
 # hoppielib-go
 
-A lightweight, developer-friendly Go library for working with [Hoppie ACARS](https://www.hoppie.nl/acars/), designed to simplify:
+A lightweight, developer-friendly Go library for working with [Hoppie's ACARS](https://www.hoppie.nl/acars/), designed to simplify:
 
 - **CPDLC Requests** – Send and receive Controller–Pilot Data Link Communications.
 - **General API Requests** – Interact with Hoppie’s API endpoints without wrestling with HTTP boilerplate.
@@ -32,5 +32,5 @@ Licensed under the MIT License – see the [LICENSE](LICENSE) file for details.
 
 ## ✈️ Disclaimer
 
-This project is **not** endorsed by Hoppie directly.
-Use responsibly and in accordance with Hoppie ACARS’ terms of service.
+This project is **not** endorsed by Hoppie/Hoppie's ACARS directly.
+Use responsibly and in accordance with Hoppie's ACARS’ terms of service.
