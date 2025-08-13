@@ -13,35 +13,52 @@ func main() {
 	manager := lib.NewACARSManager(hoppieLogon, sender)
 
 	// Setup CPDLC Connection with Receiving Station by sending a REQUEST LOGON message to WLS2
-	manager.ErrGroup.Go(func() error {
-		return manager.Connect(receiver)
-	})
+	if err := manager.Connect(receiver); err != nil {
+		fmt.Println(err)
+	}
 
-	go manager.HandleConnectedState(func() {
-		// Make a generic request once connected to REQUEST CLIMB TO FL330
-		// Might need to add this state handle to errgroup to catch any errors within this block
-		manager.CPDLCRequest("REQUEST CLIMB TO FL330", lib.RespondRequired)
+	manager.ErrGroup.Go(func() error {
+		err := manager.OnConnected(func() error {
+			// Make a generic request once connected to REQUEST CLIMB TO FL330
+			if err := manager.CPDLCRequest("REQUEST CLIMB TO FL330", lib.RespondRequired); err != nil {
+				return err
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			return err
+		}
+
+		return nil
 	})
 
 	// Spin up goroutine for processing incoming messages
 	manager.ErrGroup.Go(func() error {
 		for {
-			message := <-manager.Recv()
-			fmt.Printf("Received ACARS Message from Station: %s | Type=%s, Data=%s\n", message.Sender, message.Type, message.Data)
-			if message.Type == lib.CpdlcMessage {
-				m, e := lib.ParseCPDLCMessage(message.Data)
-				if e != nil {
-					return e
+			select {
+			case message := <-manager.Recv():
+				fmt.Printf("Received ACARS Message from Station: %s | Type=%s, Data=%s\n", message.Sender, message.Type, message.Data)
+				if message.Type == lib.CpdlcMessage {
+					m, e := lib.ParseCPDLCMessage(message.Data)
+					if e != nil {
+						return e
+					}
+
+					// Basic view for CPDLC decode within command line
+					fmt.Printf("===CPDLC===\nMIN: %d\nMRN: %s\nData: %s\n===============\n", m.Min, lib.NilCheck(m.Mrn), m.Data)
 				}
 
-				// Basic view for CPDLC decode within command line
-				fmt.Printf("===CPDLC===\nMIN: %d\nMRN: %s\nData: %s\n===============\n", m.Min, lib.NilCheck(m.Mrn), m.Data)
+			case <-manager.Ctx.Done():
+				return manager.Ctx.Err()
 			}
+
 		}
 	})
 
 	if err := manager.ErrGroup.Wait(); err != nil {
-		// Generic error handling, TODO: write proper error handling system
+		manager.Close()
 		fmt.Println(err)
 	}
 

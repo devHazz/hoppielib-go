@@ -27,7 +27,7 @@ type ACARSManager struct {
 	Connection          *ACARSConnection
 	ErrGroup            *errgroup.Group
 	inboundPollInterval int
-	ctx                 context.Context
+	Ctx                 context.Context
 	cancel              context.CancelFunc
 }
 
@@ -84,16 +84,13 @@ func NewACARSManager(logon string, callsign string) *ACARSManager {
 		},
 		inboundPollInterval: AcarsPollInterval, // 20 Second Polling Rate
 		ErrGroup:            group,
-		ctx:                 ctx,
+		Ctx:                 ctx,
 		cancel:              cancel,
 	}
 }
 
 func (m *ACARSManager) Connect(station string) error {
 	m.Connection.SetStation(station)
-
-	m.Connection.SetConnectionState(Waiting)
-	m.Connection.stateChange <- Waiting
 
 	_, err := MakeRawRequest(m.logon, *m.callsign, station, CpdlcMessage, MakeCPDLCPacket(
 		m.Connection.lastMin,
@@ -103,23 +100,41 @@ func (m *ACARSManager) Connect(station string) error {
 	))
 
 	if err != nil {
+		m.cancel()
 		return err
 	}
+
+	m.Connection.SetConnectionState(Waiting)
+	m.Connection.stateChange <- Waiting
 
 	m.ErrGroup.Go(m.Listen)
 
 	return nil
 }
 
-func (m *ACARSManager) HandleConnectedState(f func()) {
-	for state := range m.RecvState() {
-		switch state {
-		case Connected:
-			f()
-		case Waiting:
-			fmt.Printf("Waiting for logon with station: %s\n", *m.Connection.Station())
-		default:
-			fmt.Printf("Connection state change, no longer connected with station: %s\n", *m.Connection.Station())
+func (m *ACARSManager) Close() {
+	m.cancel()
+
+	m.ErrGroup.Wait()
+
+	close(m.messages)
+	close(m.Connection.stateChange)
+}
+
+func (m *ACARSManager) OnConnected(f func() error) error {
+	for {
+		select {
+		case state := <-m.RecvState():
+			switch state {
+			case Connected:
+				f()
+			case Waiting:
+				fmt.Printf("Waiting for logon with station: %s\n", *m.Connection.Station())
+			default:
+				fmt.Printf("Connection state change, no longer connected with station: %s\n", *m.Connection.Station())
+			}
+		case <-m.Ctx.Done():
+			return errors.New("manager context done/cancelled")
 		}
 	}
 }
@@ -133,45 +148,52 @@ func (m *ACARSManager) RecvState() chan ConnectionState {
 }
 
 func (m *ACARSManager) Listen() error {
-	if m.callsign == nil && m.Connection.station == nil {
+	if m.callsign == nil && m.Connection.Station() == nil {
 		return errors.New("both fields for acars connection invalid")
 	}
 
 	// Create a ticker with a certain interval to make Hoppie happy
 	fmt.Printf("Setup polling with interval of %ds..\n", m.inboundPollInterval)
 
-	for range time.Tick(time.Duration(m.inboundPollInterval) * time.Second) {
-		data, e := MakeRawRequest(
-			m.logon,
-			*m.callsign,
-			*m.Connection.station,
-			PollMessage,
-			"",
-		)
-		if e != nil {
-			return e
-		}
+	ticker := time.NewTicker(time.Duration(m.inboundPollInterval) * time.Second)
+	defer ticker.Stop()
 
-		for _, v := range ParseACARSMessage(data) {
-			if m.ConnectionState() == Waiting && v.Type == CpdlcMessage {
-				message, e := ParseCPDLCMessage(v.Data)
-				if e != nil {
-					return e
-				}
-
-				if message.Data == "LOGON ACCEPTED" && *message.Mrn == m.Connection.lastMin {
-					m.Connection.SetConnectionState(Connected)
-					m.Connection.stateChange <- Connected
-
-					fmt.Printf("Received successful logon from station: %s, pushing connected to current state\n", v.Sender)
-				}
+	for {
+		select {
+		case <-ticker.C:
+			data, e := MakeRawRequest(
+				m.logon,
+				*m.callsign,
+				*m.Connection.station,
+				PollMessage,
+				"",
+			)
+			if e != nil {
+				m.cancel()
+				return e
 			}
 
-			m.messages <- v
+			for _, v := range ParseACARSMessage(data) {
+				if m.ConnectionState() == Waiting && v.Type == CpdlcMessage {
+					message, e := ParseCPDLCMessage(v.Data)
+					if e != nil {
+						return e
+					}
+
+					if message.Data == "LOGON ACCEPTED" && *message.Mrn == m.Connection.lastMin {
+						m.Connection.SetConnectionState(Connected)
+						m.Connection.stateChange <- Connected
+
+						fmt.Printf("Received successful logon from station: %s, pushing connected to current state\n", v.Sender)
+					}
+				}
+
+				m.messages <- v
+			}
+		case <-m.Ctx.Done():
+			return m.Ctx.Err()
 		}
 	}
-
-	return nil
 }
 
 // Sends a CPDLC Request to connected station
@@ -198,6 +220,10 @@ func (m *ACARSManager) CPDLCRequest(data string, rrk ResponseRequirements) error
 		return e
 	}
 
+	return nil
+}
+
+func (m *ACARSManager) Telex(data string) error {
 	return nil
 }
 
@@ -256,6 +282,7 @@ func MakeRawRequest(
 		return "", fmt.Errorf("failed to send raw request: %w", e)
 	}
 
+	defer r.Body.Close()
 	data, e := io.ReadAll(r.Body)
 	if e != nil {
 		return "", fmt.Errorf("could not read response body via io reader: %w", e)
