@@ -1,16 +1,18 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 
 	lib "github.com/devHazz/hoppielib-go"
 )
 
-const hoppieLogon = "XXXXXXXXXXXXXX"
-
 func main() {
+	logon := flag.String("logon", "", "Hoppie Logon Code")
+	flag.Parse()
+
 	sender, receiver := "WLS1", "WLS2"
-	manager := lib.NewACARSManager(hoppieLogon, sender)
+	manager := lib.NewACARSManager(*logon, sender)
 
 	// Setup CPDLC Connection with Receiving Station by sending a REQUEST LOGON message to WLS2
 	if err := manager.Connect(receiver); err != nil {
@@ -40,7 +42,7 @@ func main() {
 			select {
 			case message := <-manager.Recv():
 				fmt.Printf("Received ACARS Message from Station: %s | Type=%s, Data=%s\n", message.Sender, message.Type, message.Data)
-				if message.Type == lib.CpdlcMessage {
+				if message.Type == lib.CpdlcMessage && manager.ConnectionState() == lib.Connected {
 					m, e := lib.ParseCPDLCMessage(message.Data)
 					if e != nil {
 						return e
