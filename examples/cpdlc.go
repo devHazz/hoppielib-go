@@ -6,7 +6,7 @@ import (
 	lib "github.com/devHazz/hoppielib-go"
 )
 
-const hoppieLogon = "pK95WpehdwX94Jd7"
+const hoppieLogon = "XXXXXXXXXXXXXX"
 
 func main() {
 	sender, receiver := "WLS1", "WLS2"
@@ -40,7 +40,7 @@ func main() {
 			select {
 			case message := <-manager.Recv():
 				fmt.Printf("Received ACARS Message from Station: %s | Type=%s, Data=%s\n", message.Sender, message.Type, message.Data)
-				if message.Type == lib.CpdlcMessage && manager.ConnectionState() == lib.Connected {
+				if message.Type == lib.CpdlcMessage {
 					m, e := lib.ParseCPDLCMessage(message.Data)
 					if e != nil {
 						return e

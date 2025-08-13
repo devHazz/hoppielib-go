@@ -180,13 +180,11 @@ func (m *ACARSManager) Listen() error {
 						return e
 					}
 
-					if message.Data == "LOGON ACCEPTED" && message.Mrn != nil && *message.Mrn == m.Connection.lastMin {
+					if message.Data == "LOGON ACCEPTED" && *message.Mrn == m.Connection.lastMin {
 						m.Connection.SetConnectionState(Connected)
 						m.Connection.stateChange <- Connected
 
 						fmt.Printf("Received successful logon from station: %s, pushing connected to current state\n", v.Sender)
-					} else {
-						fmt.Printf("Received reply to logon request, with invalid MRN from station: %s\n", v.Sender)
 					}
 				}
 
