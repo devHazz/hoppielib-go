@@ -90,6 +90,11 @@ func NewACARSManager(logon string, callsign string) *ACARSManager {
 }
 
 func (m *ACARSManager) Connect(station string) error {
+	if (m.callsign == nil || *m.callsign == "") && station == "" {
+		m.cancel()
+		return errors.New("invalid fields for logon (no up/downlink stations provided)")
+	}
+
 	m.Connection.SetStation(station)
 
 	_, err := MakeRawRequest(m.logon, *m.callsign, station, CpdlcMessage, MakeCPDLCPacket(

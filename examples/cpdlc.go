@@ -9,13 +9,15 @@ import (
 
 func main() {
 	logon := flag.String("logon", "", "Hoppie Logon Code")
+	sender := flag.String("tx", "", "Sender (Your callsign)")
+	receiver := flag.String("rx", "", "Receiving station")
+
 	flag.Parse()
 
-	sender, receiver := "WLS1", "WLS2"
-	manager := lib.NewACARSManager(*logon, sender)
+	manager := lib.NewACARSManager(*logon, *sender)
 
 	// Setup CPDLC Connection with Receiving Station by sending a REQUEST LOGON message to WLS2
-	if err := manager.Connect(receiver); err != nil {
+	if err := manager.Connect(*receiver); err != nil {
 		fmt.Println(err)
 	}
 
