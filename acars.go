@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -134,9 +136,13 @@ func (m *ACARSManager) OnConnected(f func() error) error {
 			case Connected:
 				f()
 			case Waiting:
-				fmt.Printf("Waiting for logon with station: %s\n", *m.Connection.Station())
+				log.Info().
+					Str("Station", *m.Connection.Station()).
+					Msg("Waiting for Logon")
 			default:
-				fmt.Printf("Connection state change, no longer connected with station: %s\n", *m.Connection.Station())
+				log.Info().
+					Str("Station", *m.Connection.Station()).
+					Msg("Connection Disconnected")
 			}
 		case <-m.Ctx.Done():
 			return errors.New("manager context done/cancelled")
@@ -158,7 +164,9 @@ func (m *ACARSManager) Listen() error {
 	}
 
 	// Create a ticker with a certain interval to make Hoppie happy
-	fmt.Printf("Setup polling with interval of %ds..\n", m.inboundPollInterval)
+	log.Debug().
+		Int("Interval", m.inboundPollInterval).
+		Msg("Polling Started")
 
 	ticker := time.NewTicker(time.Duration(m.inboundPollInterval) * time.Second)
 	defer ticker.Stop()
@@ -193,10 +201,21 @@ func (m *ACARSManager) Listen() error {
 						m.Connection.SetConnectionState(Connected)
 						m.Connection.stateChange <- Connected
 
-						fmt.Printf("Received successful logon from station: %s, pushing connected to current state\n", v.Sender)
+						log.Info().
+							Str("Station", v.Sender).
+							Msg("Logon Successful")
+
+					} else {
+						log.Debug().
+							Str("Stored Station", *m.Connection.Station()).
+							Int("Last Recorded MIN", m.Connection.lastMin).
+							Dict("Message", zerolog.Dict().
+								Str("Sender", v.Sender).
+								Str("MRN", NilCheck(message.Mrn)).
+								Str("Data", message.Data),
+							).
+							Msg("Received reply to logon but failed match")
 					}
-				} else {
-					fmt.Printf("Received reply to logon request, with invalid MRN from station: %s\n", v.Sender)
 				}
 
 				m.messages <- v
