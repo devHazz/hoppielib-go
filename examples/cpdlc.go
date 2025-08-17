@@ -7,9 +7,15 @@ import (
 	lib "github.com/devHazz/hoppielib-go"
 )
 
+// This example is structured around having 2 goroutines, which is handled by the ACARSManager ErrGroup to handle errors with concurrency
+//
+// You could purely do this synchronous if you'd like with a for select loop for handling message events
+//
+// The example provided will receive messages in the background whilst initiating a logon request with the station you provide.
+// Then once successfully logged on, sends an immediate request to climb to flight level 330. Just a generic example
 func main() {
 	logon := flag.String("logon", "", "Hoppie Logon Code")
-	sender := flag.String("tx", "", "Sender (Your callsign)")
+	sender := flag.String("tx", "", "Sender station (Your callsign)")
 	receiver := flag.String("rx", "", "Receiving station")
 
 	flag.Parse()
@@ -22,20 +28,11 @@ func main() {
 	}
 
 	manager.ErrGroup.Go(func() error {
-		err := manager.OnConnected(func() error {
+		return manager.OnConnected(func() error {
 			// Make a generic request once connected to REQUEST CLIMB TO FL330
-			if err := manager.CPDLCRequest("REQUEST CLIMB TO FL330", lib.RespondRequired); err != nil {
-				return err
-			}
-
-			return nil
+			return manager.CPDLCRequest("REQUEST CLIMB TO FL330", lib.RespondRequired)
 		})
 
-		if err != nil {
-			return err
-		}
-
-		return nil
 	})
 
 	// Spin up goroutine for processing incoming messages

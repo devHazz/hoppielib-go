@@ -17,7 +17,7 @@ import (
 const (
 	AcarsRequestUrl = "http://www.hoppie.nl/acars/system/connect.html"
 	// Poll Interval when polling new messages (Seconds)
-	AcarsPollInterval = 20
+	AcarsPollInterval = 60
 )
 
 type ACARSManager struct {
@@ -153,8 +153,8 @@ func (m *ACARSManager) RecvState() chan ConnectionState {
 }
 
 func (m *ACARSManager) Listen() error {
-	if m.callsign == nil && m.Connection.Station() == nil {
-		return errors.New("both fields for acars connection invalid")
+	if m.callsign == nil || m.Connection.Station() == nil {
+		return errors.New("acars listen: invalid value provided")
 	}
 
 	// Create a ticker with a certain interval to make Hoppie happy
@@ -169,7 +169,7 @@ func (m *ACARSManager) Listen() error {
 			data, e := MakeRawRequest(
 				m.logon,
 				*m.callsign,
-				*m.Connection.station,
+				*m.Connection.Station(),
 				PollMessage,
 				"",
 			)
@@ -185,7 +185,11 @@ func (m *ACARSManager) Listen() error {
 						return e
 					}
 
-					if message.Data == "LOGON ACCEPTED" && message.Mrn != nil && *message.Mrn == m.Connection.lastMin {
+					if message.Data == "LOGON ACCEPTED" &&
+						message.Mrn != nil &&
+						*message.Mrn == m.Connection.lastMin &&
+						v.Sender == *m.Connection.Station() {
+
 						m.Connection.SetConnectionState(Connected)
 						m.Connection.stateChange <- Connected
 
@@ -222,15 +226,24 @@ func (m *ACARSManager) CPDLCRequest(data string, rrk ResponseRequirements) error
 		data,
 	)
 
-	_, e := MakeRawRequest(m.logon, *m.callsign, *m.Connection.Station(), CpdlcMessage, packet)
-	if e != nil {
-		return e
+	_, err := MakeRawRequest(m.logon, *m.callsign, *m.Connection.Station(), CpdlcMessage, packet)
+	if err != nil {
+		return err
 	}
 
 	return nil
 }
 
-func (m *ACARSManager) Telex(data string) error {
+func (m *ACARSManager) Telex(data string, station string) error {
+	if data == "" || station == "" {
+		return fmt.Errorf("telex request from %s: invalid data", *m.callsign)
+	}
+
+	_, err := MakeRawRequest(m.logon, *m.callsign, station, TelexMessage, data)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
