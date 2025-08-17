@@ -3,6 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	lib "github.com/devHazz/hoppielib-go"
 )
@@ -19,6 +23,11 @@ func main() {
 	receiver := flag.String("rx", "", "Receiving station")
 
 	flag.Parse()
+
+	// Setup our zerolog consts and default values
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout})
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	zerolog.SetGlobalLevel(zerolog.DebugLevel)
 
 	manager := lib.NewACARSManager(*logon, *sender)
 
@@ -40,7 +49,12 @@ func main() {
 		for {
 			select {
 			case message := <-manager.Recv():
-				fmt.Printf("Received ACARS Message from Station: %s | Type=%s, Data=%s\n", message.Sender, message.Type, message.Data)
+				log.Info().
+					Str("Station", message.Sender).
+					Str("Type", fmt.Sprintf("%s (%s)", message.Type, message.Type.Description())).
+					Str("Data", message.Data).
+					Msg("ACARS Message")
+
 				if message.Type == lib.CpdlcMessage && manager.ConnectionState() == lib.Connected {
 					m, e := lib.ParseCPDLCMessage(message.Data)
 					if e != nil {
@@ -48,7 +62,12 @@ func main() {
 					}
 
 					// Basic view for CPDLC decode within command line
-					fmt.Printf("===CPDLC===\nMIN: %d\nMRN: %s\nData: %s\n===============\n", m.Min, lib.NilCheck(m.Mrn), m.Data)
+					log.Info().
+						Int("MIN", m.Min).
+						Str("MRN", lib.NilCheck(m.Mrn)).
+						Str("RRK", fmt.Sprintf("%s (%s)", m.Rrk, m.Rrk.Description())).
+						Str("Data", m.Data).
+						Msg("CPDLC Message")
 				}
 
 			case <-manager.Ctx.Done():
@@ -60,7 +79,7 @@ func main() {
 
 	if err := manager.ErrGroup.Wait(); err != nil {
 		manager.Close()
-		fmt.Println(err)
+		log.Err(err).Msg("ACARS Manager Error")
 	}
 
 }
