@@ -33,7 +33,7 @@ func main() {
 
 	// Setup CPDLC Connection with Receiving Station by sending a REQUEST LOGON message to WLS2
 	if err := manager.Connect(*receiver); err != nil {
-		fmt.Println(err)
+		log.Error().Err(err).Msg("Manager Connect Error")
 	}
 
 	manager.ErrGroup.Go(func() error {
