@@ -55,7 +55,7 @@ func main() {
 					Str("Data", message.Data).
 					Msg("ACARS Message")
 
-				if message.Type == lib.CpdlcMessage && manager.ConnectionState() == lib.Connected {
+				if message.Type == lib.CpdlcMessageType && manager.ConnectionState() == lib.Connected {
 					m, e := lib.ParseCPDLCMessage(message.Data)
 					if e != nil {
 						return e

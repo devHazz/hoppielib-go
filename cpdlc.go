@@ -3,44 +3,15 @@ package hoppielibgo
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 )
 
 var (
-	// General error handling
-	ErrInvalidCPDLCFormat = errors.New("Message does not follow CPDLC message format")
-	ErrInvalidAdsCFormat  = errors.New("Message does not follow ADS-C message format")
-
-	responseRequirementDescription = map[ResponseRequirements]string{
-		RespondWilcoUnable:         "Wilco or Unable",
-		RespondAffirmNegative:      "Affirm or Negative",
-		RespondRoger:               "Roger",
-		RespondOperationalResponse: "Operational Response Required",
-		RespondRequired:            "Response Required",
-		RespondNotRequired:         "Response Not Required",
-	}
+	ErrInvalidCPDLCFormat = errors.New("Invalid CPDLC format")
 )
 
-type CPDLCMessage struct {
-	Min  int
-	Mrn  *int
-	Rrk  ResponseRequirements
-	Data string
-}
-
-type ACARSMessage struct {
-	Sender string
-	Type   MessageType
-	Data   string
-}
-
 type ResponseRequirements string
-
-func isValidResponseRequirement(rrk string) bool {
-	return responseRequirementDescription[ResponseRequirements(rrk)] != ""
-}
 
 const (
 	RespondWilcoUnable         ResponseRequirements = "WU"
@@ -51,28 +22,34 @@ const (
 	RespondNotRequired         ResponseRequirements = "N"
 )
 
-func (rrk *ResponseRequirements) Description() string {
-	return responseRequirementDescription[*rrk]
+var responseRequirementMap = map[ResponseRequirements]string{
+	RespondWilcoUnable:         "Wilco or Unable",
+	RespondAffirmNegative:      "Affirm or Negative",
+	RespondRoger:               "Roger",
+	RespondOperationalResponse: "Operational Response Required",
+	RespondRequired:            "Response Required",
+	RespondNotRequired:         "Response Not Required",
 }
 
-func ParseACARSMessage(data string) (messages []ACARSMessage) {
-	expr := regexp.MustCompile(`\{([A-Z0-9]+)\s+([a-z]+)\s+(\{[^}]+\})\}`)
-	matches := expr.FindAllStringSubmatch(data, -1)
+func (rrk *ResponseRequirements) Description() string {
+	return responseRequirementMap[*rrk]
+}
 
-	for _, m := range matches {
-		messages = append(messages, ACARSMessage{
-			Sender: m[1],
-			Type:   MessageType(m[2]),
-			Data:   m[3][1 : len(m[3])-1],
-		})
-	}
+func isValidResponseRequirement(rrk string) bool {
+	return responseRequirementMap[ResponseRequirements(rrk)] != ""
+}
 
-	return messages
+type CPDLCMessage struct {
+	Min  int
+	Mrn  *int
+	Rrk  ResponseRequirements
+	Data string
 }
 
 func ParseCPDLCMessage(data string) (*CPDLCMessage, error) {
 	if stripped, valid := strings.CutPrefix(data, "/data2/"); valid {
 		parts := strings.Split(stripped, "/")
+
 		if len(parts) != 4 {
 			return nil, ErrInvalidCPDLCFormat
 		}
