@@ -30,8 +30,8 @@ func main() {
 	zerolog.SetGlobalLevel(zerolog.DebugLevel)
 
 	var opts lib.ACARSManagerOptions
-	opts.PollInterval(20)
-	opts.LogonTimeout(10)
+	opts.PollInterval(30)
+	// opts.LogonTimeout(10)
 
 	manager := lib.NewACARSManager(*logon, *sender, opts)
 
@@ -40,13 +40,12 @@ func main() {
 		log.Error().Err(err).Msg("Manager Connect Error")
 	}
 
-	manager.ErrGroup.Go(func() error {
-		return manager.OnConnected(func() error {
-			// Make a generic request once connected to REQUEST CLIMB TO FL330
-			return manager.CPDLCRequest("REQUEST CLIMB TO FL330", lib.RespondRequired)
-		})
-
-	})
+	// manager.ErrGroup.Go(func() error {
+	// 	return manager.OnConnected(func() error {
+	// 		// Make a generic request once connected to REQUEST CLIMB TO FL330
+	// 		return manager.CPDLCRequest("REQUEST CLIMB TO FL330", lib.RespondRequired)
+	// 	})
+	// })
 
 	// Spin up goroutine for processing incoming messages
 	manager.ErrGroup.Go(func() error {

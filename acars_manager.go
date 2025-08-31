@@ -151,7 +151,26 @@ func (c *ACARSConnection) PushState(state ConnectionState) {
 	defer c.mutex.Unlock()
 
 	c.state = state
-	c.rx <- state
+	select {
+	case c.rx <- state:
+		switch state {
+		case Waiting:
+			log.Info().
+				Str("Station", *c.Station()).
+				Msg("Waiting for Logon")
+		case Disconnected:
+			log.Info().
+				Str("Station", *c.Station()).
+				Msg("Connection Disconnected")
+		}
+	default:
+		// Receiver channel is full
+		//
+		// This is usually the case if there's handle for the oncoming state change. For example, the OnConnected event isn't written in your code/you don't try
+		// and manually receive the state from the channel via RecvState()
+		log.Warn().
+			Msg("Attempted to push state to state receiver, channel is full/no receiver")
+	}
 }
 
 func (m *ACARSManager) Connect(station string) error {
@@ -193,17 +212,8 @@ func (m *ACARSManager) OnConnected(f func() error) error {
 	for {
 		select {
 		case state := <-m.RecvState():
-			switch state {
-			case Connected:
+			if state == Connected {
 				f()
-			case Waiting:
-				log.Info().
-					Str("Station", *m.Connection.Station()).
-					Msg("Waiting for Logon")
-			default:
-				log.Info().
-					Str("Station", *m.Connection.Station()).
-					Msg("Connection Disconnected")
 			}
 		case <-m.Ctx.Done():
 			return errors.New("manager context done/cancelled")
@@ -242,15 +252,13 @@ func (m *ACARSManager) Listen() error {
 	for {
 		select {
 		case <-timeout:
+			// TODO: Handle logon timeout a little better
+			// Currently pushes a quit to manager context cancel & exits the program with the error
+			// Need to allow this to be logged, but allow for a retry in logon within same process
 			m.Connection.PushState(Disconnected)
+			m.cancel()
 			return errors.New("CPDLC logon timeout reached, pushed Disconnected state")
 		case <-ticker.C:
-			// elapsedTime = elapsedTime + m.opts.pollingInterval
-
-			// if m.opts.cpdlcLogonTimeout != nil && elapsedTime >= *m.opts.cpdlcLogonTimeout {
-			// 	// CPDLC Logon timeout, push state to disconnected
-			// }
-
 			data, e := MakeRawRequest(
 				m.logon,
 				*m.callsign,
