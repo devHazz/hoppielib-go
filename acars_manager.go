@@ -20,7 +20,7 @@ import (
 const (
 	AcarsRequestUrl = "http://www.hoppie.nl/acars/system/connect.html"
 	// Poll Interval when polling new messages (Seconds)
-	AcarsPollInterval = 20
+	DefaultPollInterval = 60
 )
 
 type ACARSManager struct {
@@ -31,12 +31,84 @@ type ACARSManager struct {
 	// Channel for receiving parsed ACARS messages
 	//
 	// Parsed into up/downlink station callsign, message type & message data
-	messages            chan ACARSMessage
-	Connection          *ACARSConnection
-	ErrGroup            *errgroup.Group
-	inboundPollInterval int
-	Ctx                 context.Context
-	cancel              context.CancelFunc
+	messages chan ACARSMessage
+	// ACARSConnection struct for handling ongoing CPDLC connection with a station
+	Connection *ACARSConnection
+	// Error group for handling goroutines and any forthcoming panics/errors
+	ErrGroup *errgroup.Group
+	// Options for the ACARSManager
+	//
+	// Allows certain 'features' to be set like ADS-C Reporting and custom timeouts/intervals
+	opts   ACARSManagerOptions
+	Ctx    context.Context
+	cancel context.CancelFunc
+}
+
+type ACARSManagerOptions struct {
+	// Enable ADS-C Reporting to ACARS. To be used by downlink stations, reporting altitude, speed, heading etc
+	adscReporting bool
+	// Amount of time to wait out before timing out a logon with a station. If time exceeds the value set/default value, state will be set to Disconnected
+	//
+	// If nil, will wait an indefinite amount of time before state change or otherwise
+	cpdlcLogonTimeout *int
+	// Set a custom ACARS polling interval (Default is 60 seconds)
+	pollingInterval int
+}
+
+func (o *ACARSManagerOptions) AdsCReporting(enable bool) {
+	o.adscReporting = enable
+}
+
+func (o *ACARSManagerOptions) LogonTimeout(time int) {
+	o.cpdlcLogonTimeout = &time
+}
+
+// Set polling interval for ACARS listen
+//
+// Time value needs to be in seconds, so for example SetPollInterval(30) would be 30 seconds
+func (o *ACARSManagerOptions) PollInterval(time int) {
+	if !(time <= 0) {
+		o.pollingInterval = time
+	}
+}
+
+func NewACARSManager(logon string, callsign string, opts ...ACARSManagerOptions) *ACARSManager {
+	ctx, cancel := context.WithCancel(context.Background())
+	group, _ := errgroup.WithContext(ctx)
+
+	options := ACARSManagerOptions{
+		adscReporting:     false,
+		cpdlcLogonTimeout: nil,
+		pollingInterval:   DefaultPollInterval,
+	}
+
+	if len(opts) > 0 {
+		options = opts[0]
+		if options.adscReporting {
+			log.Info().
+				Bool("ADS-C Reporting", true).
+				Msg("Manager Option Added")
+		}
+
+		if options.pollingInterval == 0 {
+			options.pollingInterval = DefaultPollInterval
+		}
+	}
+
+	return &ACARSManager{
+		logon:    logon,
+		callsign: &callsign,
+		messages: make(chan ACARSMessage, 1),
+		Connection: &ACARSConnection{
+			state:   Disconnected,
+			rx:      make(chan ConnectionState, 1),
+			lastMin: 1,
+		},
+		opts:     options,
+		ErrGroup: group,
+		Ctx:      ctx,
+		cancel:   cancel,
+	}
 }
 
 type ConnectionState int
@@ -82,26 +154,6 @@ func (c *ACARSConnection) PushState(state ConnectionState) {
 	c.rx <- state
 }
 
-func NewACARSManager(logon string, callsign string) *ACARSManager {
-	ctx, cancel := context.WithCancel(context.Background())
-	group, _ := errgroup.WithContext(ctx)
-
-	return &ACARSManager{
-		logon:    logon,
-		callsign: &callsign,
-		messages: make(chan ACARSMessage, 1),
-		Connection: &ACARSConnection{
-			state:   Disconnected,
-			rx:      make(chan ConnectionState, 1),
-			lastMin: 1,
-		},
-		inboundPollInterval: AcarsPollInterval, // 20 Second Polling Rate
-		ErrGroup:            group,
-		Ctx:                 ctx,
-		cancel:              cancel,
-	}
-}
-
 func (m *ACARSManager) Connect(station string) error {
 	if (m.callsign == nil || *m.callsign == "") && station == "" {
 		m.cancel()
@@ -122,8 +174,8 @@ func (m *ACARSManager) Connect(station string) error {
 		return err
 	}
 
-	m.Connection.PushState(Waiting)
 	m.ErrGroup.Go(m.Listen)
+	m.Connection.PushState(Waiting)
 
 	return nil
 }
@@ -174,15 +226,31 @@ func (m *ACARSManager) Listen() error {
 
 	// Create a ticker with a certain interval to make Hoppie happy
 	log.Debug().
-		Int("Interval", m.inboundPollInterval).
+		Int("Interval", m.opts.pollingInterval).
 		Msg("Polling Started")
 
-	ticker := time.NewTicker(time.Duration(m.inboundPollInterval) * time.Second)
+	// elapsedTime := 0
+	ticker := time.NewTicker(time.Duration(m.opts.pollingInterval) * time.Second)
+	var timeout <-chan time.Time
+
+	if m.opts.cpdlcLogonTimeout != nil {
+		timeout = time.After(time.Duration(*m.opts.cpdlcLogonTimeout) * time.Second)
+	}
+
 	defer ticker.Stop()
 
 	for {
 		select {
+		case <-timeout:
+			m.Connection.PushState(Disconnected)
+			return errors.New("CPDLC logon timeout reached, pushed Disconnected state")
 		case <-ticker.C:
+			// elapsedTime = elapsedTime + m.opts.pollingInterval
+
+			// if m.opts.cpdlcLogonTimeout != nil && elapsedTime >= *m.opts.cpdlcLogonTimeout {
+			// 	// CPDLC Logon timeout, push state to disconnected
+			// }
+
 			data, e := MakeRawRequest(
 				m.logon,
 				*m.callsign,
@@ -195,6 +263,7 @@ func (m *ACARSManager) Listen() error {
 				return e
 			}
 
+			// We parse any ACARS messages within the data array & check for valid logon accepted CPDLC messages to push to a connected state
 			for _, v := range ParseACARSMessage(data) {
 				if m.ConnectionState() == Waiting && v.Type == CpdlcMessageType {
 					message, e := ParseCPDLCMessage(v.Data)
@@ -203,8 +272,7 @@ func (m *ACARSManager) Listen() error {
 					}
 
 					if message.Data == "LOGON ACCEPTED" &&
-						message.Mrn != nil &&
-						*message.Mrn == m.Connection.lastMin &&
+						message.Mrn != nil && *message.Mrn == m.Connection.lastMin &&
 						v.Sender == *m.Connection.Station() {
 
 						m.Connection.PushState(Connected)

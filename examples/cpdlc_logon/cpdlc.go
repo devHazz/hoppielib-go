@@ -29,7 +29,11 @@ func main() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	zerolog.SetGlobalLevel(zerolog.DebugLevel)
 
-	manager := lib.NewACARSManager(*logon, *sender)
+	var opts lib.ACARSManagerOptions
+	opts.PollInterval(20)
+	opts.LogonTimeout(10)
+
+	manager := lib.NewACARSManager(*logon, *sender, opts)
 
 	// Setup CPDLC Connection with Receiving Station by sending a REQUEST LOGON message to WLS2
 	if err := manager.Connect(*receiver); err != nil {
