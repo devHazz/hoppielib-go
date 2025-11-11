@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	hoppielibgo "github.com/devHazz/hoppielib-go/gen"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
@@ -20,7 +21,11 @@ import (
 const (
 	AcarsRequestUrl = "http://www.hoppie.nl/acars/system/connect.html"
 	// Poll Interval when polling new messages (Seconds)
-	DefaultPollInterval = 60
+	DefaultPollInterval = 60 * time.Second
+)
+
+var (
+	ErrLogonTimeoutReached = errors.New("CPDLC logon timeout reached")
 )
 
 type ACARSManager struct {
@@ -45,28 +50,34 @@ type ACARSManager struct {
 }
 
 type ACARSManagerOptions struct {
-	// Enable ADS-C Reporting to ACARS. To be used by downlink stations, reporting altitude, speed, heading etc
+	// Enable Persistent Contract ADS-C Reporting. To be used by downlink stations, reporting altitude, speed, heading etc
 	adscReporting bool
 	// Amount of time to wait out before timing out a logon with a station. If time exceeds the value set/default value, state will be set to Disconnected
 	//
-	// If nil, will wait an indefinite amount of time before state change or otherwise
-	cpdlcLogonTimeout *int
+	// If nil, will wait an indefinite amount of time before the state changes or otherwise
+	cpdlcLogonTimeout *time.Duration
+	// Maximum number of retry attempts for CPDLC logon timeout
+	maximumRetryAttempts int
 	// Set a custom ACARS polling interval (Default is 60 seconds)
-	pollingInterval int
+	pollingInterval time.Duration
 }
 
 func (o *ACARSManagerOptions) AdsCReporting(enable bool) {
 	o.adscReporting = enable
 }
 
-func (o *ACARSManagerOptions) LogonTimeout(time int) {
+func (o *ACARSManagerOptions) LogonTimeout(time time.Duration) {
 	o.cpdlcLogonTimeout = &time
+}
+
+func (o *ACARSManagerOptions) MaximumRetries(attempts int) {
+	o.maximumRetryAttempts = attempts
 }
 
 // Set polling interval for ACARS listen
 //
 // Time value needs to be in seconds, so for example SetPollInterval(30) would be 30 seconds
-func (o *ACARSManagerOptions) PollInterval(time int) {
+func (o *ACARSManagerOptions) PollInterval(time time.Duration) {
 	if !(time <= 0) {
 		o.pollingInterval = time
 	}
@@ -77,9 +88,10 @@ func NewACARSManager(logon string, callsign string, opts ...ACARSManagerOptions)
 	group, _ := errgroup.WithContext(ctx)
 
 	options := ACARSManagerOptions{
-		adscReporting:     false,
-		cpdlcLogonTimeout: nil,
-		pollingInterval:   DefaultPollInterval,
+		adscReporting:        false,
+		cpdlcLogonTimeout:    nil,
+		maximumRetryAttempts: 1,
+		pollingInterval:      DefaultPollInterval,
 	}
 
 	if len(opts) > 0 {
@@ -101,7 +113,6 @@ func NewACARSManager(logon string, callsign string, opts ...ACARSManagerOptions)
 		messages: make(chan ACARSMessage, 1),
 		Connection: &ACARSConnection{
 			state:   Disconnected,
-			rx:      make(chan ConnectionState, 1),
 			lastMin: 1,
 		},
 		opts:     options,
@@ -116,18 +127,42 @@ type ConnectionState int
 const (
 	Connected ConnectionState = iota
 	Waiting
+	TimeoutReached
 	Disconnected
 )
 
-// Structure for an ACARS connection, set as disconnected by default
+func (c ConnectionState) String() string {
+	switch c {
+	case Connected:
+		return "Connected"
+	case Waiting:
+		return "Waiting"
+	case TimeoutReached:
+		return "Timeout Reached"
+	case Disconnected:
+		return "Disconnected"
+	}
+
+	return ""
+}
+
+// ACARSConnection Structure for an ACARS connection, set as disconnected by default
 //
 // Once logon has been accepted by a downlink station, the state changes to Connected & station field value is no longer nil
 type ACARSConnection struct {
-	mutex   sync.Mutex
-	state   ConnectionState
-	rx      chan ConnectionState
-	station *string
-	lastMin int
+	mutex     sync.Mutex
+	state     ConnectionState
+	receivers []chan ConnectionState
+	station   *string
+	lastMin   int
+}
+
+func (c *ACARSConnection) Subscribe() <-chan ConnectionState {
+	ch := make(chan ConnectionState, 1)
+	c.mutex.Lock()
+	c.receivers = append(c.receivers, ch)
+	c.mutex.Unlock()
+	return ch
 }
 
 func (c *ACARSConnection) SetStation(station string) {
@@ -148,35 +183,22 @@ func (c *ACARSConnection) IncrementMin() {
 
 func (c *ACARSConnection) PushState(state ConnectionState) {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	c.state = state
-	select {
-	case c.rx <- state:
-		switch state {
-		case Waiting:
-			log.Info().
-				Str("Station", *c.Station()).
-				Msg("Waiting for Logon")
-		case Disconnected:
-			log.Info().
-				Str("Station", *c.Station()).
-				Msg("Connection Disconnected")
+	log.Debug().Msg(fmt.Sprintf("Attempting to push state (%s)", state.String()))
+	for _, sub := range c.receivers {
+		select {
+		case sub <- state:
+		default:
+			log.Warn().Msg("Receiver not ready to receive state")
 		}
-	default:
-		// Receiver channel is full
-		//
-		// This is usually the case if there's handle for the oncoming state change. For example, the OnConnected event isn't written in your code/you don't try
-		// and manually receive the state from the channel via RecvState()
-		log.Warn().
-			Msg("Attempted to push state to state receiver, channel is full/no receiver")
 	}
+	c.mutex.Unlock()
 }
 
 func (m *ACARSManager) Connect(station string) error {
 	if (m.callsign == nil || *m.callsign == "") && station == "" {
 		m.cancel()
-		return errors.New("invalid fields for logon (no up/downlink stations provided)")
+		return errors.New("Invalid fields for logon (no up/downlink stations provided)")
 	}
 
 	m.Connection.SetStation(station)
@@ -202,49 +224,74 @@ func (m *ACARSManager) Connect(station string) error {
 func (m *ACARSManager) Close() {
 	m.cancel()
 
-	m.ErrGroup.Wait()
+	for _, v := range m.Connection.receivers {
+		close(v)
+	}
+
+	err := m.ErrGroup.Wait()
+	if err != nil {
+		return
+	}
 
 	close(m.messages)
-	close(m.Connection.rx)
 }
 
-func (m *ACARSManager) OnConnected(f func() error) error {
-	for {
-		select {
-		case state := <-m.RecvState():
-			if state == Connected {
-				f()
+func (m *ACARSManager) OnConnected(f func() error) {
+	rx := m.Connection.Subscribe()
+	m.ErrGroup.Go(func() error {
+		for {
+			select {
+			case state := <-rx:
+				if state == Connected {
+					f()
+				}
+			case <-m.Ctx.Done():
+				return errors.New("OnConnected event: manager context done/cancelled")
 			}
-		case <-m.Ctx.Done():
-			return errors.New("manager context done/cancelled")
 		}
-	}
+	})
+}
+
+func (m *ACARSManager) OnLogonTimeout(f func() error) {
+	rx := m.Connection.Subscribe()
+	attempts := 0
+
+	m.ErrGroup.Go(func() error {
+		for {
+			select {
+			case state := <-rx:
+				if state == TimeoutReached {
+					if attempts <= m.opts.maximumRetryAttempts {
+						f()
+						attempts++
+					}
+				}
+			case <-m.Ctx.Done():
+				return errors.New("OnLogonTimeout event: manager context done/cancelled")
+			}
+		}
+	})
 }
 
 func (m *ACARSManager) ConnectionState() ConnectionState {
 	return m.Connection.state
 }
 
-func (m *ACARSManager) RecvState() chan ConnectionState {
-	return m.Connection.rx
-}
-
 func (m *ACARSManager) Listen() error {
 	if m.callsign == nil || m.Connection.Station() == nil {
 		return errors.New("acars listen: invalid value provided")
 	}
-
 	// Create a ticker with a certain interval to make Hoppie happy
 	log.Debug().
-		Int("Interval", m.opts.pollingInterval).
+		Int("Interval", int(m.opts.pollingInterval.Seconds())).
 		Msg("Polling Started")
 
 	// elapsedTime := 0
-	ticker := time.NewTicker(time.Duration(m.opts.pollingInterval) * time.Second)
+	ticker := time.NewTicker(m.opts.pollingInterval)
 	var timeout <-chan time.Time
 
 	if m.opts.cpdlcLogonTimeout != nil {
-		timeout = time.After(time.Duration(*m.opts.cpdlcLogonTimeout) * time.Second)
+		timeout = time.After(*m.opts.cpdlcLogonTimeout)
 	}
 
 	defer ticker.Stop()
@@ -252,12 +299,11 @@ func (m *ACARSManager) Listen() error {
 	for {
 		select {
 		case <-timeout:
-			// TODO: Handle logon timeout a little better
-			// Currently pushes a quit to manager context cancel & exits the program with the error
-			// Need to allow this to be logged, but allow for a retry in logon within same process
-			m.Connection.PushState(Disconnected)
-			m.cancel()
-			return errors.New("CPDLC logon timeout reached, pushed Disconnected state")
+			m.Connection.PushState(TimeoutReached)
+			log.Info().
+				Str("Station", *m.Connection.Station()).
+				Int("Timeout", int(m.opts.cpdlcLogonTimeout.Seconds())).
+				Msg("Logon Timeout Reached")
 		case <-ticker.C:
 			data, e := MakeRawRequest(
 				m.logon,
@@ -310,14 +356,14 @@ func (m *ACARSManager) Listen() error {
 	}
 }
 
-// Sends a CPDLC Request to connected station
+// CPDLCRequest Sends a CPDLC Request to a connected station,
 //
 // For example, providing LOGON ACCEPTED in the data field & OperationalResponse as a RRK
 //
 // Will result in data being sent with an output like `/data2/min/mrn/NE/LOGON ACCEPTED`
-func (m *ACARSManager) CPDLCRequest(data string, rrk ResponseRequirements) error {
+func (m *ACARSManager) CPDLCRequest(data RequestStringer, rrk ResponseRequirements) error {
 	if m.ConnectionState() != Connected || m.Connection.Station() == nil {
-		return errors.New("no cpdlc connection made or invalid station")
+		return errors.New("No current CPDLC connection/invalid station")
 	}
 
 	m.Connection.IncrementMin()
@@ -326,7 +372,7 @@ func (m *ACARSManager) CPDLCRequest(data string, rrk ResponseRequirements) error
 		m.Connection.lastMin,
 		nil,
 		rrk,
-		data,
+		data.Request(),
 	)
 
 	_, err := MakeRawRequest(m.logon, *m.callsign, *m.Connection.Station(), CpdlcMessageType, packet)
@@ -337,6 +383,9 @@ func (m *ACARSManager) CPDLCRequest(data string, rrk ResponseRequirements) error
 	return nil
 }
 
+// WeatherRequest Submit a weather request via ACARS by providing an airport ICAO and WeatherRequestType
+//
+// As per Hoppie's docs, any network providers like VATSIM, IVAO & PilotEdge will attempt to match to a live station and pull an ATIS
 func (m *ACARSManager) WeatherRequest(icao string, dataType WeatherRequestType) error {
 	if len(icao) < 4 || len(icao) > 4 {
 		return errors.New("weather request: invalid icao")
@@ -359,7 +408,7 @@ func (m *ACARSManager) WeatherRequest(icao string, dataType WeatherRequestType) 
 	return nil
 }
 
-// Sends a telex message with the provided body & station to send to
+// Telex Sends a telex message with the provided body & station to send to
 func (m *ACARSManager) Telex(data string, station string) error {
 	if data == "" || station == "" {
 		return fmt.Errorf("telex request from %s: invalid data", *m.callsign)
@@ -373,11 +422,38 @@ func (m *ACARSManager) Telex(data string, station string) error {
 	return nil
 }
 
-// Basic implementation of how the queue system would look when receiving a message from
+// Pre-departure Clearance Request (PDC)
+func (m *ACARSManager) ClearanceRequest(
+	station string,
+	aircraftType string,
+	departureIcao string,
+	destinationIcao string,
+	aircraftStand string,
+	atisInformation string,
+) error {
+	if station == "" || aircraftType == "" ||
+		departureIcao == "" || destinationIcao == "" ||
+		aircraftStand == "" || atisInformation == "" {
+		return errors.New("Invalid pre-departure clearance data")
+	}
+
+	request := hoppielibgo.DM25_1{ClearanceType: "PREDEP"}
+	_, err := MakeRawRequest(m.logon, *m.callsign, station, TelexMessageType,
+		fmt.Sprintf("%s %s %s TO %s AT %s STAND %s ATIS %s",
+			request.Request(), *m.callsign, aircraftType, destinationIcao, departureIcao, aircraftStand, atisInformation,
+		))
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (m *ACARSManager) Recv() chan ACARSMessage {
 	return m.messages
 }
 
+// Create the CPDLC packet to be converted and sent across the wire
 func MakeCPDLCPacket(
 	min int,
 	mrn *int,
@@ -415,6 +491,8 @@ func MakeRawRequest(
 	messageType MessageType,
 	content string,
 ) (string, error) {
+	client := &http.Client{}
+
 	requestParams := url.Values{
 		"logon":  {logon},
 		"from":   {callsign},
@@ -423,15 +501,24 @@ func MakeRawRequest(
 		"packet": {content},
 	}
 	constructedUrl := AcarsRequestUrl + "?" + requestParams.Encode()
-	r, e := http.Get(constructedUrl)
+
+	req, err := http.NewRequest("GET", constructedUrl, nil)
+	if err != nil {
+		return "", fmt.Errorf("Could not construct new raw request: %w", err)
+	}
+
+	const userAgent = "hoppielib-go/1.0"
+	req.Header.Set("User-Agent", userAgent)
+
+	r, e := client.Do(req)
 	if e != nil {
-		return "", fmt.Errorf("failed to send raw request: %w", e)
+		return "", fmt.Errorf("Failed to send raw request: %w", e)
 	}
 
 	defer r.Body.Close()
 	data, e := io.ReadAll(r.Body)
 	if e != nil {
-		return "", fmt.Errorf("could not read response body via io reader: %w", e)
+		return "", fmt.Errorf("Could not read response body via io reader: %w", e)
 	}
 
 	if strings.HasPrefix(string(data), "ok") {

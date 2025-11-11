@@ -11,6 +11,10 @@ var (
 	ErrInvalidCPDLCFormat = errors.New("Invalid CPDLC format")
 )
 
+type RequestStringer interface {
+	Request() string
+}
+
 type ResponseRequirements string
 
 const (

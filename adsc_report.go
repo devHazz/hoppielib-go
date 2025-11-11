@@ -7,15 +7,7 @@ import (
 	"strings"
 )
 
-var (
-	ErrInvalidPrefix       = errors.New("Invalid ADS-C message prefix")
-	ErrInvalidFieldCount   = errors.New("Invalid ADS-C field count")
-	ErrInvalidADSCFormat   = errors.New("Invalid ADS-C format")
-	ErrInvalidHeading      = errors.New("Invalid heading value")
-	ErrInvalidPositionData = errors.New("Invalid position data (latitude or longitude)")
-)
-
-type ADSCMessage struct {
+type AdsContractReport struct {
 	Callsign  string
 	Time      string
 	Latitude  float32
@@ -24,7 +16,7 @@ type ADSCMessage struct {
 	Heading   *int
 }
 
-func ParseAdsCMessage(message string) (*ADSCMessage, error) {
+func ParseAdsCReport(message string) (*AdsContractReport, error) {
 	if stripped, valid := strings.CutPrefix(message, "REPORT"); valid {
 		parts := strings.Split(strings.TrimPrefix(stripped, " "), " ")
 
@@ -63,9 +55,9 @@ func ParseAdsCMessage(message string) (*ADSCMessage, error) {
 			return nil, ErrInvalidADSCFormat
 		}
 
-		return &ADSCMessage{
+		return &AdsContractReport{
 			Callsign:  callsign,
-			Time:      time,
+			Time:      time[len(time)-4:],
 			Latitude:  float32(latitude),
 			Longitude: float32(longitude),
 			Altitude:  altitude,

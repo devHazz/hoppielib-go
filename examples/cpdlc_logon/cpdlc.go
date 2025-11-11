@@ -4,7 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
+	generated "github.com/devHazz/hoppielib-go/gen"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
@@ -13,7 +15,7 @@ import (
 
 // This example is structured around having 2 goroutines, which is handled by the ACARSManager ErrGroup to handle errors with concurrency
 //
-// You could purely do this synchronous if you'd like with a for select loop for handling message events
+// You could purely do this synchronously if you'd like with a for select loop for handling message events
 //
 // The example provided will receive messages in the background whilst initiating a logon request with the station you provide.
 // Then once successfully logged on, sends an immediate request to climb to flight level 330. Just a generic example
@@ -21,31 +23,44 @@ func main() {
 	logon := flag.String("logon", "", "Hoppie Logon Code")
 	sender := flag.String("tx", "", "Sender station (Your callsign)")
 	receiver := flag.String("rx", "", "Receiving station")
+	fallbackReceiver := flag.String("rx-fallback", "", "Receiving station on initial logon timeout")
 
 	flag.Parse()
 
 	// Setup our zerolog consts and default values
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout})
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	// View debug logs via global DebugLevel
 	zerolog.SetGlobalLevel(zerolog.DebugLevel)
 
+	// ACARS Manager Options
 	var opts lib.ACARSManagerOptions
-	opts.PollInterval(30)
-	// opts.LogonTimeout(10)
-
+	opts.LogonTimeout(20 * time.Second)
+	// Will retry on fallback receiver
+	opts.MaximumRetries(2)
 	manager := lib.NewACARSManager(*logon, *sender, opts)
 
-	// Setup CPDLC Connection with Receiving Station by sending a REQUEST LOGON message to WLS2
+	// Set up CPDLC Connection with Receiving Station by sending a REQUEST LOGON message to WLS2
 	if err := manager.Connect(*receiver); err != nil {
 		log.Error().Err(err).Msg("Manager Connect Error")
 	}
 
-	// manager.ErrGroup.Go(func() error {
-	// 	return manager.OnConnected(func() error {
-	// 		// Make a generic request once connected to REQUEST CLIMB TO FL330
-	// 		return manager.CPDLCRequest("REQUEST CLIMB TO FL330", lib.RespondRequired)
-	// 	})
-	// })
+	manager.OnConnected(func() error {
+		// Make a generic request once connected, to REQUEST CLIMB TO FL330
+		return manager.CPDLCRequest(&generated.DM9{Level: "FL330"}, lib.RespondRequired)
+	})
+
+	// If we fail to logon with a station (if the LogonTimeout option is set),
+	// Try to connect to a new receiver with a suffix of + (for testing)
+	manager.OnLogonTimeout(func() error {
+		if fallbackReceiver != nil {
+			if err := manager.Connect(*fallbackReceiver); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 
 	// Spin up goroutine for processing incoming messages
 	manager.ErrGroup.Go(func() error {
